@@ -1,24 +1,31 @@
 #!/usr/bin/env python3
 """
-Step 7: Quest VR实时控制机器人 - 使用pinch控制夹爪版本
+Step 7: Quest VR实时控制机器人 - Pinch控制 + 平滑运动版本
 
-与原版的区别：
-- 手部追踪模式使用 pinch（捏合）而不是 squeeze（握紧）来控制夹爪
-- pinch检测通常更灵敏和可靠
+主要功能：
+1. 手部追踪：使用 pinch（捏合）控制夹爪
+2. 平滑滤波：指数平滑，让动作更丝滑
+3. 速度限制：可选的速度限制功能
 
-映射规则：
+夹爪控制：
 - Pinch值范围: 0.0(食指拇指捏紧) ~ 0.1+(分开)
 - 夹爪映射: 
   * pinch <= 0.0 → 夹爪完全闭合 (0)
   * pinch >= 0.1 → 夹爪完全张开 (1000)
   * 中间值线性插值
 
-使用方法：
-- 捏紧食指和拇指 → 夹爪闭合抓取
-- 分开食指和拇指 → 夹爪张开释放
+平滑控制参数（RobotController类）：
+- enable_smoothing: 是否启用平滑 (默认True)
+- smoothing_factor: 平滑系数 0.0-1.0 (默认0.3，推荐0.2-0.5)
+  * 越小 = 响应越快，越抖
+  * 越大 = 越平滑，延迟越大
+- enable_velocity_limit: 是否限速 (默认False)
+- max_velocity: 最大速度 m/s (默认0.15)
 
-可调参数（第171行）：
-- PINCH_MAX: 默认0.10，可根据实际测试调整（建议范围0.08-0.15）
+可调参数位置：
+- PINCH_MAX: 第497行附近，默认0.10
+- smoothing_factor: 第64行，默认0.3
+- max_velocity: 第61行，默认0.15
 """
 
 import numpy as np
@@ -36,7 +43,7 @@ import pickle
 
 class RobotController:
     """机器人控制器"""
-    def __init__(self, robot_ip="10.192.1.2"):
+    def __init__(self, robot_ip="10.192.1.2", enable_smoothing=True, enable_velocity_limit=False):
         self.url = f"ws://{robot_ip}:5000"
         self.ws = None
         self.accid = None
@@ -55,7 +62,20 @@ class RobotController:
             'z_min': -0.15, 'z_max': 0.20
         }
         
-        self.max_velocity = 0.15  # m/s
+        # 运动控制参数
+        self.enable_smoothing = enable_smoothing
+        self.enable_velocity_limit = enable_velocity_limit
+        self.max_velocity = 0.15  # m/s (仅在enable_velocity_limit=True时生效)
+        
+        # 平滑滤波参数 (0.0=无平滑, 1.0=完全平滑/不动)
+        self.smoothing_factor = 0.3  # 推荐范围: 0.2-0.5
+        
+        # 平滑状态变量
+        self.smoothed_left_pos = None
+        self.smoothed_right_pos = None
+        self.smoothed_left_gripper = None
+        self.smoothed_right_gripper = None
+        self.last_time = None
         
         # 夹爪参数
         self.gripper_speed = 500
@@ -146,8 +166,54 @@ class RobotController:
             np.clip(offset[2], self.workspace['z_min'], self.workspace['z_max'])
         ]
     
-    def set_gripper(self, left_opening=None, right_opening=None):
-        """控制夹爪开口度"""
+    def smooth_position(self, target_pos, smoothed_pos):
+        """指数平滑滤波 - 位置"""
+        if not self.enable_smoothing or smoothed_pos is None:
+            return list(target_pos)  # 确保返回列表而不是numpy数组
+        
+        # 指数平滑: output = alpha * new + (1-alpha) * old
+        alpha = 1.0 - self.smoothing_factor
+        smoothed = alpha * np.array(target_pos) + self.smoothing_factor * np.array(smoothed_pos)
+        return smoothed.tolist()  # 转换为列表
+    
+    def smooth_gripper(self, target_gripper, smoothed_gripper):
+        """指数平滑滤波 - 夹爪"""
+        if not self.enable_smoothing or smoothed_gripper is None:
+            return target_gripper
+        
+        alpha = 1.0 - self.smoothing_factor * 0.7  # 夹爪响应稍快一些
+        return alpha * target_gripper + self.smoothing_factor * 0.7 * smoothed_gripper
+    
+    def limit_velocity(self, target_pos, current_pos, dt):
+        """限制速度"""
+        if not self.enable_velocity_limit or current_pos is None or dt <= 0:
+            return list(target_pos)  # 确保返回列表
+        
+        target = np.array(target_pos)
+        current = np.array(current_pos)
+        delta = target - current
+        distance = np.linalg.norm(delta)
+        
+        max_distance = self.max_velocity * dt
+        if distance > max_distance:
+            # 限制移动距离
+            delta = delta / distance * max_distance
+            return (current + delta).tolist()
+        
+        return list(target_pos)  # 确保返回列表
+    
+    def set_gripper(self, left_opening=None, right_opening=None, apply_smoothing=True):
+        """控制夹爪开口度（带平滑）"""
+        # 应用平滑
+        if apply_smoothing:
+            if left_opening is not None:
+                left_opening = self.smooth_gripper(left_opening, self.smoothed_left_gripper)
+                self.smoothed_left_gripper = left_opening
+            
+            if right_opening is not None:
+                right_opening = self.smooth_gripper(right_opening, self.smoothed_right_gripper)
+                self.smoothed_right_gripper = right_opening
+        
         data = {}
         
         if left_opening is not None:
@@ -166,6 +232,25 @@ class RobotController:
         
         if data:
             self.send_command("request_set_claw_cmd", data)
+    
+    def set_pose_smooth(self, left_pos, left_quat, right_pos, right_quat, head_quat=None, dt=0.033):
+        """设置机器人位姿（带平滑和速度限制）"""
+        # 应用速度限制
+        if self.enable_velocity_limit:
+            left_pos = self.limit_velocity(left_pos, self.smoothed_left_pos, dt)
+            right_pos = self.limit_velocity(right_pos, self.smoothed_right_pos, dt)
+        
+        # 应用平滑
+        if self.enable_smoothing:
+            left_pos = self.smooth_position(left_pos, self.smoothed_left_pos)
+            right_pos = self.smooth_position(right_pos, self.smoothed_right_pos)
+            
+            # 更新平滑状态
+            self.smoothed_left_pos = left_pos
+            self.smoothed_right_pos = right_pos
+        
+        # 发送指令
+        self.set_pose(left_pos, left_quat, right_pos, right_quat, head_quat)
 
 
 def matrix_to_pos_quat(matrix):
@@ -316,10 +401,35 @@ def main():
     print(f"   https://vuer.ai?grid=False")
     input("\n等待Quest连接后按Enter开始初始化机器人...")
     
+    # 平滑控制选项（默认启用）
+    print("\n🎛️  运动控制选项:")
+    print("1. 启用平滑滤波 + 速度限制 (推荐) - 动作丝滑稳定")
+    print("2. 仅启用平滑滤波 - 丝滑但不限速")
+    print("3. 原始模式 - 无平滑无限速")
+    control_choice = input("请选择 [1/2/3，默认1]: ").strip() or "1"
+    
+    if control_choice == "1":
+        enable_smoothing = True
+        enable_velocity_limit = True
+    elif control_choice == "2":
+        enable_smoothing = True
+        enable_velocity_limit = False
+    else:
+        enable_smoothing = False
+        enable_velocity_limit = False
+    
     # 连接机器人
     print("\n连接机器人...")
-    robot = RobotController()
+    robot = RobotController(
+        enable_smoothing=enable_smoothing,
+        enable_velocity_limit=enable_velocity_limit
+    )
     robot.connect()
+    
+    if enable_smoothing:
+        print(f"✅ 平滑滤波已启用 (系数: {robot.smoothing_factor})")
+    if enable_velocity_limit:
+        print(f"✅ 速度限制已启用 (最大: {robot.max_velocity}m/s)")
     
     # 初始化机器人
     print("\n初始化机器人模式...")
@@ -386,12 +496,13 @@ def main():
             _, left_quat = matrix_to_pos_quat(tele_data.left_arm_pose)
             _, right_quat = matrix_to_pos_quat(tele_data.right_arm_pose)
             
-            # 发送到机器人
-            robot.set_pose(
+            # 发送到机器人（带平滑和速度限制）
+            robot.set_pose_smooth(
                 left_pos=left_offset_safe,
                 left_quat=left_quat,
                 right_pos=right_offset_safe,
-                right_quat=right_quat
+                right_quat=right_quat,
+                dt=dt
             )
             
             # 夹爪控制
