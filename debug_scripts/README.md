@@ -42,6 +42,15 @@
    - 包含标定、实时控制、安全退出
    - 使用真实Quest手柄/手部追踪
    - 完整的VR控制流程
+   - **新增**: 通过手的张合控制夹爪开合
+     - 手部追踪模式：手握紧闭合夹爪，手张开打开夹爪
+     - 手柄模式：握把(Grip)按钮控制夹爪
+
+9. **test_gripper.py** - 夹爪独立测试
+   - 单独测试夹爪控制功能（无需VR）
+   - 自动测试夹爪从完全张开到完全闭合
+   - 手动控制模式，可输入任意开口度
+   - 用于验证夹爪硬件和API是否正常
 
 ### 辅助模块
 
@@ -105,7 +114,17 @@ python step4_safe_movement.py
 python step5_keyboard_control.py
 ```
 
-### 6. Quest VR实时控制（最终版）
+### 6. 夹爪测试（可选）
+
+如果机器人装有因时二指夹爪，可以先测试夹爪功能：
+
+```bash
+python test_gripper.py
+```
+
+这会自动测试夹爪从完全张开到完全闭合，确认夹爪硬件工作正常。
+
+### 7. Quest VR实时控制（最终版）
 
 **使用原版TeleVuerWrapper**，最稳定可靠：
 
@@ -121,6 +140,13 @@ python step7_quest_real_control.py
 5. 机器人初始化（阻尼→准备→Mode0→Mode1）
 6. **标定**: 双手放在舒适位置，保持不动3秒
 7. 开始实时控制！移动双手控制机器人
+
+**控制说明**:
+- **手臂控制**: 移动双手，机器人手臂会跟随移动
+- **夹爪控制**:
+  - **手部追踪模式**: 握紧拳头闭合夹爪，张开手掌打开夹爪
+  - **手柄模式**: 按下握把(Grip)按钮闭合夹爪，松开打开夹爪
+  - 夹爪开口度实时显示在控制台：`夹爪 L:xxx R:xxx` (0=闭合, 1000=完全张开)
 
 **标定说明**:
 - 标定位置=控制的"零点"
@@ -215,6 +241,21 @@ A: 在step7中添加缩放因子：
 self.robot_left_offset = (left_current - left_origin) * 0.5  # 50%灵敏度
 ```
 
+### Q: 夹爪没有响应？
+A: 检查以下几点：
+1. 确保机器人已初始化到Mode 1
+2. 确认使用的是因时二指夹爪（API支持）
+3. 手部追踪模式下，确保Quest能正确识别手部动作
+4. 手柄模式下，尝试按下握把按钮(Grip)
+5. 查看控制台的夹爪开口度数值是否变化
+
+### Q: 如何调整夹爪速度和力度？
+A: 在 `step7_quest_real_control.py` 中修改 `RobotController` 类的初始化参数：
+```python
+self.gripper_speed = 500  # 夹爪速度 [0, 1000]，默认500
+self.gripper_force = 300  # 夹爪力度 [0, 1000]，默认300
+```
+
 ## 🎯 项目结构
 
 ```
@@ -227,6 +268,7 @@ debug_scripts/
 ├── step4_safe_movement.py        # 安全移动测试 ⭐
 ├── step5_keyboard_control.py     # 键盘控制
 ├── step7_quest_real_control.py   # Quest VR实时控制 🎯
+├── test_gripper.py               # 夹爪独立测试
 ├── televuer/                     # VR通信模块（复制自xr_teleoperate）
 │   ├── __init__.py
 │   ├── televuer.py               # Vuer服务器封装

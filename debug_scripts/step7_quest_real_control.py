@@ -1,12 +1,24 @@
 #!/usr/bin/env python3
 """
-Step 7: Quest VR实时控制机器人 (使用原版TeleVuerWrapper)
+Step 7: Quest VR实时控制机器人 - 使用pinch控制夹爪版本
 
-安全说明:
-1. 机器人必须悬挂，脚离地≥15cm
-2. 控制范围限制在±20cm以内
-3. 遥控器在手边随时可按L2+X急停
-4. 使用相对坐标系，[0,0,0]为零偏移，相对于Mode 1初始姿态
+与原版的区别：
+- 手部追踪模式使用 pinch（捏合）而不是 squeeze（握紧）来控制夹爪
+- pinch检测通常更灵敏和可靠
+
+映射规则：
+- Pinch值范围: 0.0(食指拇指捏紧) ~ 0.1+(分开)
+- 夹爪映射: 
+  * pinch <= 0.0 → 夹爪完全闭合 (0)
+  * pinch >= 0.1 → 夹爪完全张开 (1000)
+  * 中间值线性插值
+
+使用方法：
+- 捏紧食指和拇指 → 夹爪闭合抓取
+- 分开食指和拇指 → 夹爪张开释放
+
+可调参数（第171行）：
+- PINCH_MAX: 默认0.10，可根据实际测试调整（建议范围0.08-0.15）
 """
 
 import numpy as np
@@ -30,14 +42,13 @@ class RobotController:
         self.accid = None
         self.connected = False
         
-        # ⚠️ 重要：API使用相对坐标系！
-        # [0.0, 0.0, 0.0] = 相对于Mode 0初始姿态，零偏移
+        # 基础位姿（相对坐标系）
         self.base_left_pos = [0.0, 0.0, 0.0]
         self.base_left_quat = [0.0, 0.0, 0.0, 1.0]
         self.base_right_pos = [0.0, 0.0, 0.0]
         self.base_right_quat = [0.0, 0.0, 0.0, 1.0]
         
-        # 工作空间限制（相对偏移的最大值）
+        # 工作空间限制
         self.workspace = {
             'x_min': -0.10, 'x_max': 0.20,
             'y_min': -0.15, 'y_max': 0.15,
@@ -45,6 +56,10 @@ class RobotController:
         }
         
         self.max_velocity = 0.15  # m/s
+        
+        # 夹爪参数
+        self.gripper_speed = 500
+        self.gripper_force = 300
         
     def on_message(self, ws, message):
         data = json.loads(message)
@@ -82,8 +97,7 @@ class RobotController:
         
         if not self.connected:
             raise Exception("连接超时")
-            
-        # 等待accid
+        
         time.sleep(1)
         return True
         
@@ -109,12 +123,12 @@ class RobotController:
         time.sleep(3)
         
     def set_ub_manip_mode(self, mode):
-        """设置上肢操作模式 (0/1/2)"""
+        """设置上肢操作模式"""
         self.send_command("request_set_ub_manip_mode", {"mode": mode})
         time.sleep(3 if mode in [0, 2] else 1)
         
     def set_pose(self, left_pos, left_quat, right_pos, right_quat, head_quat=None):
-        """设置机器人位姿（相对坐标）"""
+        """设置机器人位姿"""
         data = {
             "head_quat": head_quat or [0.0, 0.0, 0.0, 1.0],
             "left_hand_pos": left_pos,
@@ -131,13 +145,33 @@ class RobotController:
             np.clip(offset[1], self.workspace['y_min'], self.workspace['y_max']),
             np.clip(offset[2], self.workspace['z_min'], self.workspace['z_max'])
         ]
+    
+    def set_gripper(self, left_opening=None, right_opening=None):
+        """控制夹爪开口度"""
+        data = {}
+        
+        if left_opening is not None:
+            left_opening = int(np.clip(left_opening, 0, 1000))
+            data["left_opening"] = left_opening
+            data["left_speed"] = self.gripper_speed
+            data["left_force"] = self.gripper_force
+            data["left_mode"] = 3
+        
+        if right_opening is not None:
+            right_opening = int(np.clip(right_opening, 0, 1000))
+            data["right_opening"] = right_opening
+            data["right_speed"] = self.gripper_speed
+            data["right_force"] = self.gripper_force
+            data["right_mode"] = 3
+        
+        if data:
+            self.send_command("request_set_claw_cmd", data)
 
 
 def matrix_to_pos_quat(matrix):
     """从4x4矩阵提取位置和四元数"""
     pos = matrix[:3, 3].tolist()
     
-    # 旋转矩阵转四元数
     R = matrix[:3, :3]
     trace = np.trace(R)
     
@@ -192,7 +226,6 @@ def load_calibration(filename="vr_calibration.pkl"):
         with open(filename, 'rb') as f:
             calib_data = pickle.load(f)
         
-        # 显示标定信息
         timestamp = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(calib_data['timestamp']))
         print(f"\n📂 找到标定文件:")
         print(f"   保存时间: {timestamp}")
@@ -211,7 +244,7 @@ def calibrate_vr(tv_wrapper):
     
     calibration_samples = []
     print("   标定中", end='', flush=True)
-    for i in range(30):  # 1秒采样30次
+    for i in range(30):
         tele_data = tv_wrapper.get_motion_state_data()
         calibration_samples.append({
             'left': tele_data.left_arm_pose.copy(),
@@ -221,7 +254,6 @@ def calibrate_vr(tv_wrapper):
         if (i+1) % 10 == 0:
             print(".", end='', flush=True)
     
-    # 计算标定偏移（平均值）
     calib_left = np.mean([s['left'] for s in calibration_samples], axis=0)
     calib_right = np.mean([s['right'] for s in calibration_samples], axis=0)
     
@@ -235,7 +267,7 @@ def calibrate_vr(tv_wrapper):
 
 def main():
     print("="*60)
-    print("Step 7: Meta Quest VR实时控制")
+    print("Step 7: Meta Quest VR实时控制 (Pinch版本)")
     print("="*60)
     print("\n⚠️  安全检查:")
     print("□ 机器人已悬挂，脚离地≥15cm")
@@ -253,16 +285,16 @@ def main():
         return
     
     print("\n初始化VR接口...")
-    # 创建虚拟图像共享内存（TeleVuerWrapper需要）
+    # 创建虚拟图像共享内存
     img_shape = (480, 640, 3)
     img_shm = shared_memory.SharedMemory(create=True, size=np.prod(img_shape) * np.uint8().itemsize)
     img_array = np.ndarray(img_shape, dtype=np.uint8, buffer=img_shm.buf)
-    img_array[:] = 128  # 灰色背景
+    img_array[:] = 128
     
     # 选择模式
     print("\n选择输入模式:")
     print("1. 手柄控制器 (controller)")
-    print("2. 手部追踪 (hand tracking)")
+    print("2. 手部追踪 (hand tracking) - 使用PINCH控制夹爪")
     mode = input("请选择 [1/2]: ").strip()
     use_hand_tracking = (mode == "2")
     
@@ -279,10 +311,9 @@ def main():
     )
     
     print(f"✅ VR服务已启动")
-    print(f"   模式: {'手部追踪' if use_hand_tracking else '手柄控制器'}")
+    print(f"   模式: {'手部追踪(PINCH)' if use_hand_tracking else '手柄控制器'}")
     print(f"\n📱 在Quest中打开浏览器，访问:")
     print(f"   https://vuer.ai?grid=False")
-    print(f"   (或者显示的具体地址)")
     input("\n等待Quest连接后按Enter开始初始化机器人...")
     
     # 连接机器人
@@ -308,12 +339,11 @@ def main():
     print("✅ Mode 1 (等待控制)")
     time.sleep(1)
     
-    # 标定VR坐标系（每次都重新标定）
+    # 标定
     print("\n"+"="*60)
     print("🎯 标定阶段")
     print("="*60)
     
-    # 5秒倒计时准备
     print("\n⏱️  准备标定，倒计时...")
     print("   请将双手移动到舒适的起始位置")
     for i in range(5, 0, -1):
@@ -321,7 +351,6 @@ def main():
         time.sleep(1)
     print("   ✅ 时间到!\n")
     
-    # 执行标定
     calib_left, calib_right = calibrate_vr(tv_wrapper)
     save_calibration(calib_left, calib_right)
     
@@ -329,6 +358,10 @@ def main():
     print("\n"+"="*60)
     print("🤖 开始控制! (Ctrl+C退出)")
     print("="*60)
+    if use_hand_tracking:
+        print("💡 夹爪控制: 食指和拇指捏合(pinch)闭合夹爪，分开打开夹爪")
+    else:
+        print("💡 夹爪控制: 握把(Grip)按钮控制夹爪")
     print()
     
     try:
@@ -353,7 +386,7 @@ def main():
             _, left_quat = matrix_to_pos_quat(tele_data.left_arm_pose)
             _, right_quat = matrix_to_pos_quat(tele_data.right_arm_pose)
             
-            # 发送到机器人（相对坐标）
+            # 发送到机器人
             robot.set_pose(
                 left_pos=left_offset_safe,
                 left_quat=left_quat,
@@ -361,10 +394,63 @@ def main():
                 right_quat=right_quat
             )
             
-            # 打印状态（每秒1次）
-            if int(time.time() * 1) % 1 == 0:
+            # 夹爪控制
+            if use_hand_tracking:
+                # *** 使用PINCH而不是SQUEEZE ***
+                # 根据实际测试，有效pinch范围: 0.0(捏紧) ~ 0.1(分开)
+                # 映射: pinch=0.0 -> 夹爪=0(闭合), pinch=0.1 -> 夹爪=1000(张开)
+                if tele_data.left_pinch_value is not None and tele_data.right_pinch_value is not None:
+                    # 定义pinch的有效控制范围
+                    PINCH_MAX = 0.10  # 分开到这个值时，夹爪完全张开
+                    PINCH_MIN = 0.00  # 捏紧到这个值时，夹爪完全闭合
+                    
+                    # pinch_value从TeleVuer来的是百分比，需要转换为0-1
+                    left_pinch = tele_data.left_pinch_value / 100.0
+                    right_pinch = tele_data.right_pinch_value / 100.0
+                    
+                    # 归一化到0-1，超出范围会被clip
+                    # pinch=0.0 -> norm=0.0 -> gripper=0 (闭合)
+                    # pinch=0.1 -> norm=1.0 -> gripper=1000 (张开)
+                    left_pinch_norm = np.clip(left_pinch / PINCH_MAX, 0.0, 1.0)
+                    right_pinch_norm = np.clip(right_pinch / PINCH_MAX, 0.0, 1.0)
+                    
+                    # 映射到夹爪开口度 [0, 1000]
+                    left_gripper = int(left_pinch_norm * 1000)
+                    right_gripper = int(right_pinch_norm * 1000)
+                    
+                    robot.set_gripper(left_opening=left_gripper, right_opening=right_gripper)
+            else:
+                # 手柄模式：使用握把按钮
+                if tele_data.tele_state:
+                    left_squeeze = tele_data.tele_state.left_squeeze_ctrl_value
+                    right_squeeze = tele_data.tele_state.right_squeeze_ctrl_value
+                    left_gripper = int((1.0 - left_squeeze) * 1000)
+                    right_gripper = int((1.0 - right_squeeze) * 1000)
+                    robot.set_gripper(left_opening=left_gripper, right_opening=right_gripper)
+            
+            # 打印状态
+            if int(time.time() * 3) % 3 == 0:
+                gripper_info = ""
+                if use_hand_tracking:
+                    if tele_data.left_pinch_value is not None:
+                        PINCH_MAX = 0.10  # 与控制逻辑保持一致
+                        left_p_raw = tele_data.left_pinch_value / 100.0
+                        right_p_raw = tele_data.right_pinch_value / 100.0
+                        left_p_norm = np.clip(left_p_raw / PINCH_MAX, 0.0, 1.0)
+                        right_p_norm = np.clip(right_p_raw / PINCH_MAX, 0.0, 1.0)
+                        left_g = int(left_p_norm * 1000)
+                        right_g = int(right_p_norm * 1000)
+                        gripper_info = f"  夹爪 L:{left_g:4d} R:{right_g:4d} [Pinch: L:{left_p_raw:.3f} R:{right_p_raw:.3f}]"
+                elif tele_data.tele_state:
+                    left_sq = tele_data.tele_state.left_squeeze_ctrl_value
+                    right_sq = tele_data.tele_state.right_squeeze_ctrl_value
+                    left_g = int((1.0 - left_sq) * 1000)
+                    right_g = int((1.0 - right_sq) * 1000)
+                    gripper_info = f"  夹爪 L:{left_g:4d} R:{right_g:4d} [Grip: L:{left_sq:.2f} R:{right_sq:.2f}]"
+                
                 print(f"\r左: [{left_offset_safe[0]:+.3f}, {left_offset_safe[1]:+.3f}, {left_offset_safe[2]:+.3f}]  "
-                      f"右: [{right_offset_safe[0]:+.3f}, {right_offset_safe[1]:+.3f}, {right_offset_safe[2]:+.3f}]", end='')
+                      f"右: [{right_offset_safe[0]:+.3f}, {right_offset_safe[1]:+.3f}, {right_offset_safe[2]:+.3f}]"
+                      f"{gripper_info}", end='')
             
             # 控制频率
             elapsed = time.time() - loop_start
@@ -390,3 +476,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
