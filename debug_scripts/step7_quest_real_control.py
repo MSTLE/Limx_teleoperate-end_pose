@@ -6,6 +6,12 @@ Step 7: Quest VR实时控制机器人 - Pinch控制 + 平滑运动版本
 1. 手部追踪：使用 pinch（捏合）控制夹爪
 2. 平滑滤波：指数平滑，让动作更丝滑
 3. 速度限制：可选的速度限制功能
+4. 头部控制：VR头显俯仰角实时控制机器人头部姿态
+
+控制映射：
+- 双臂位置/姿态：跟随VR手部或手柄位置
+- 头部姿态：跟随VR头显俯仰角（范围：-30° ~ 45°）
+- 夹爪：Pinch手势或手柄Grip按钮
 
 夹爪控制：
 - Pinch值范围: 0.0(食指拇指捏紧) ~ 0.1+(分开)
@@ -24,8 +30,8 @@ Step 7: Quest VR实时控制机器人 - Pinch控制 + 平滑运动版本
 
 可调参数位置：
 - PINCH_MAX: 第497行附近，默认0.10
-- smoothing_factor: 第64行，默认0.3
-- max_velocity: 第61行，默认0.15
+- smoothing_factor: 第77行，默认0.3
+- max_velocity: 第74行，默认0.15
 """
 
 import numpy as np
@@ -512,10 +518,13 @@ def main():
     print("\n"+"="*60)
     print("🤖 开始控制! (Ctrl+C退出)")
     print("="*60)
+    print("🎯 控制映射:")
+    print("   • 双臂：跟随VR手部/手柄位置和姿态")
+    print("   • 头部：跟随VR头显俯仰角（-30° ~ 45°）")
     if use_hand_tracking:
-        print("💡 夹爪控制: 食指和拇指捏合(pinch)闭合夹爪，分开打开夹爪")
+        print("   • 夹爪：食指和拇指捏合(pinch)控制开合")
     else:
-        print("💡 夹爪控制: 握把(Grip)按钮控制夹爪")
+        print("   • 夹爪：握把(Grip)按钮控制开合")
     print()
     
     try:
@@ -536,9 +545,10 @@ def main():
             left_offset_safe = robot.clip_to_workspace(left_offset)
             right_offset_safe = robot.clip_to_workspace(right_offset)
             
-            # 提取四元数
+            # 提取四元数（双臂和头部）
             _, left_quat = matrix_to_pos_quat(tele_data.left_arm_pose)
             _, right_quat = matrix_to_pos_quat(tele_data.right_arm_pose)
+            _, head_quat = matrix_to_pos_quat(tele_data.head_pose)
             
             # 发送到机器人（带平滑和速度限制）
             robot.set_pose_smooth(
@@ -546,6 +556,7 @@ def main():
                 left_quat=left_quat,
                 right_pos=right_offset_safe,
                 right_quat=right_quat,
+                head_quat=head_quat,
                 dt=dt
             )
             
