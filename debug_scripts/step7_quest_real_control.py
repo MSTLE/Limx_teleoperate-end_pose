@@ -39,6 +39,12 @@ from televuer.tv_wrapper import TeleVuerWrapper
 import os
 from pathlib import Path
 import pickle
+import sys
+
+# 导入图像客户端
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, current_dir)
+from image_service.image_client import ImageClient
 
 
 class RobotController:
@@ -374,7 +380,22 @@ def main():
     img_shape = (480, 640, 3)
     img_shm = shared_memory.SharedMemory(create=True, size=np.prod(img_shape) * np.uint8().itemsize)
     img_array = np.ndarray(img_shape, dtype=np.uint8, buffer=img_shm.buf)
-    img_array[:] = 128
+    img_array[:] = 128  # 灰色背景
+    
+    # 视频回传选项
+    print("\n📹 机器人视频回传:")
+    print("1. 启用视频回传 - 在Quest中看到机器人摄像头画面")
+    print("2. 禁用视频回传 - 仅控制，不显示画面")
+    video_choice = input("请选择 [1/2，默认1]: ").strip() or "1"
+    enable_video = (video_choice == "1")
+    
+    robot_ip = "10.192.1.3"  # 机器人IP (从test文件看是10.192.1.3)
+    zmq_port = 5556  # ZMQ端口 (使用5556)
+    image_client = None
+    
+    if enable_video:
+        print(f"   将从 {robot_ip}:{zmq_port} 接收视频流")
+        print(f"   图像形状: {img_shape}")
     
     # 选择模式
     print("\n选择输入模式:")
@@ -400,6 +421,29 @@ def main():
     print(f"\n📱 在Quest中打开浏览器，访问:")
     print(f"   https://vuer.ai?grid=False")
     input("\n等待Quest连接后按Enter开始初始化机器人...")
+    
+    # 启动视频接收（如果启用）
+    if enable_video:
+        print(f"\n🚀 启动图像客户端...")
+        print(f"   目标服务器: {robot_ip}:{zmq_port}")
+        print(f"   共享内存: {img_shm.name}")
+        print(f"   图像形状: {img_shape}")
+        
+        image_client = ImageClient(
+            img_shape=img_shape,
+            img_shm_name=img_shm.name,
+            image_show=False,  # 不显示调试窗口（在VR中显示）
+            server_address=robot_ip,
+            port=zmq_port,
+            enable_stats=False  # 关闭统计信息打印
+        )
+        image_client.start()
+        print(f"✅ 图像客户端已启动")
+        print(f"💡 提示: 图像会自动显示在Quest的Vuer界面中")
+        print(f"   如果没有画面，请确保机器人端ZMQ服务器正在运行:")
+        print(f"   ssh robot@{robot_ip}")
+        print(f"   python ros2_to_zmq_bridge.py --camera camera0 --port {zmq_port} --stats")
+        time.sleep(2)  # 等待连接建立
     
     # 平滑控制选项（默认启用）
     print("\n🎛️  运动控制选项:")
@@ -572,6 +616,16 @@ def main():
         print("\n\n用户中断")
     finally:
         print("\n退出控制模式...")
+        
+        # 先停止视频接收，避免干扰
+        if image_client:
+            print("📷 停止图像客户端...")
+            try:
+                image_client.close()
+            except Exception as e:
+                # 忽略关闭时的ZMQ错误（正常现象）
+                pass
+        
         robot.set_ub_manip_mode(2)
         print("✅ Mode 2 (退出)")
         time.sleep(2)
@@ -579,9 +633,13 @@ def main():
         robot.enter_damping()
         print("✅ 阻尼模式")
         
-        # 清理
-        img_shm.close()
-        img_shm.unlink()
+        # 清理共享内存
+        try:
+            img_shm.close()
+            img_shm.unlink()
+        except Exception:
+            pass
+        
         print("👋 退出完成")
 
 
