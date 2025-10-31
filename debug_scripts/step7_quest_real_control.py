@@ -27,11 +27,15 @@ Step 7: Quest VR实时控制机器人 - Pinch控制 + 平滑运动版本
   * 越大 = 越平滑，延迟越大
 - enable_velocity_limit: 是否限速 (默认False)
 - max_velocity: 最大速度 m/s (默认0.15)
+- motion_scale: 运动缩放系数 (默认1.5，推荐1.5-2.0)
+  * 放大VR手部移动映射到机器人末端的幅度
+  * 越大 = 机器人移动范围越大
 
 可调参数位置：
-- PINCH_MAX: 第497行附近，默认0.10
-- smoothing_factor: 第77行，默认0.3
-- max_velocity: 第74行，默认0.15
+- PINCH_MAX: 第577行附近，默认0.10
+- smoothing_factor: 第86行，默认0.3
+- max_velocity: 第83行，默认0.15
+- motion_scale: 第71行，默认1.5（或在启动时交互式设置）
 """
 
 import numpy as np
@@ -55,7 +59,7 @@ from image_service.image_client import ImageClient
 
 class RobotController:
     """机器人控制器"""
-    def __init__(self, robot_ip="10.192.1.2", enable_smoothing=True, enable_velocity_limit=False):
+    def __init__(self, robot_ip="10.192.1.2", enable_smoothing=True, enable_velocity_limit=False, motion_scale=1.5):
         self.url = f"ws://{robot_ip}:5000"
         self.ws = None
         self.accid = None
@@ -67,11 +71,14 @@ class RobotController:
         self.base_right_pos = [0.0, 0.0, 0.0]
         self.base_right_quat = [0.0, 0.0, 0.0, 1.0]
         
+        # 运动缩放系数（放大VR手部移动）
+        self.motion_scale = motion_scale  # 默认1.5倍，可调整为1.0-3.0
+        
         # 工作空间限制
         self.workspace = {
-            'x_min': -0.10, 'x_max': 0.20,
-            'y_min': -0.15, 'y_max': 0.15,
-            'z_min': -0.15, 'z_max': 0.20
+            'x_min': -0.70, 'x_max': 0.70,
+            'y_min': -0.70, 'y_max': 0.70,
+            'z_min': -0.70, 'z_max': 0.70
         }
         
         # 运动控制参数
@@ -468,11 +475,24 @@ def main():
         enable_smoothing = False
         enable_velocity_limit = False
     
+    # 运动缩放系数设置
+    print("\n🔧 运动缩放系数 (放大VR手部移动):")
+    print("   推荐值: 1.5-2.0 (默认1.5)")
+    print("   说明: 系数越大，机器人手臂移动幅度越大")
+    motion_scale_input = input("请输入缩放系数 [默认1.5]: ").strip()
+    try:
+        motion_scale = float(motion_scale_input) if motion_scale_input else 1.5
+        motion_scale = max(0.5, min(motion_scale, 3.0))  # 限制在0.5-3.0范围
+    except ValueError:
+        motion_scale = 1.5
+        print("   ⚠️  输入无效，使用默认值1.5")
+    
     # 连接机器人
     print("\n连接机器人...")
     robot = RobotController(
         enable_smoothing=enable_smoothing,
-        enable_velocity_limit=enable_velocity_limit
+        enable_velocity_limit=enable_velocity_limit,
+        motion_scale=motion_scale
     )
     robot.connect()
     
@@ -480,6 +500,7 @@ def main():
         print(f"✅ 平滑滤波已启用 (系数: {robot.smoothing_factor})")
     if enable_velocity_limit:
         print(f"✅ 速度限制已启用 (最大: {robot.max_velocity}m/s)")
+    print(f"✅ 运动缩放已设置 (系数: {robot.motion_scale}x)")
     
     # 初始化机器人
     print("\n初始化机器人模式...")
@@ -540,6 +561,10 @@ def main():
             # 计算相对偏移
             left_offset = (tele_data.left_arm_pose[:3, 3] - calib_left[:3, 3]).tolist()
             right_offset = (tele_data.right_arm_pose[:3, 3] - calib_right[:3, 3]).tolist()
+            
+            # 应用运动缩放系数
+            left_offset = [x * robot.motion_scale for x in left_offset]
+            right_offset = [x * robot.motion_scale for x in right_offset]
             
             # 限制到安全范围
             left_offset_safe = robot.clip_to_workspace(left_offset)
