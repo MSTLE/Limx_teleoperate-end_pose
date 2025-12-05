@@ -7,11 +7,18 @@ Step 7: Quest VR实时控制机器人 - Pinch控制 + 平滑运动版本
 2. 平滑滤波：指数平滑，让动作更丝滑
 3. 速度限制：可选的速度限制功能
 4. 头部控制：VR头显俯仰角实时控制机器人头部姿态
+5. baselink坐标系：位置控制基于机器人腰部baselink坐标系
 
 控制映射：
-- 双臂位置/姿态：跟随VR手部或手柄位置
+- 双臂位置/姿态：跟随VR手部或手柄位置（baselink坐标系）
 - 头部姿态：跟随VR头显俯仰角（范围：-30° ~ 45°）
 - 夹爪：Pinch手势或手柄Grip按钮
+
+坐标系说明：
+- 参考坐标系：base_link（机器人腰部）
+- X轴（红色）：机器人前进方向
+- Y轴（绿色）：正方向向左
+- Z轴（蓝色）：竖直向上
 
 夹爪控制：
 - Pinch值范围: 0.0(食指拇指捏紧) ~ 0.1+(分开)
@@ -64,8 +71,9 @@ class RobotController:
         self.ws = None
         self.accid = None
         self.connected = False
+        self.ee_pose_response = None  # 用于接收位姿查询响应
         
-        # 基础位姿（相对坐标系）
+        # 基础位姿（baselink坐标系下的初始绝对位置，标定时设置）
         self.base_left_pos = [0.0, 0.0, 0.0]
         self.base_left_quat = [0.0, 0.0, 0.0, 1.0]
         self.base_right_pos = [0.0, 0.0, 0.0]
@@ -74,11 +82,15 @@ class RobotController:
         # 运动缩放系数（放大VR手部移动）
         self.motion_scale = motion_scale  # 默认1.5倍，可调整为1.0-3.0
         
-        # 工作空间限制
+        # 工作空间限制（baselink坐标系下的绝对范围）
+        # 根据机器人实际情况调整这些值
+        # x: 前后（红色轴，正方向向前）
+        # y: 左右（绿色轴，正方向向左）
+        # z: 上下（蓝色轴，正方向向上）
         self.workspace = {
-            'x_min': -0.70, 'x_max': 0.70,
-            'y_min': -0.70, 'y_max': 0.70,
-            'z_min': -0.70, 'z_max': 0.70
+            'x_min': -0.50, 'x_max': 0.80,   # 前后范围
+            'y_min': -0.80, 'y_max': 0.80,   # 左右范围
+            'z_min': 0.20, 'z_max': 1.50     # 高度范围（腰部以上）
         }
         
         # 运动控制参数
@@ -105,6 +117,10 @@ class RobotController:
         if 'accid' in data and not self.accid:
             self.accid = data['accid']
             print(f"✅ 已连接: {self.accid}")
+        
+        # 处理位姿查询响应
+        if data.get('title') == 'response_get_ub_manip_ee_pose':
+            self.ee_pose_response = data.get('data', {})
         
     def on_open(self, ws):
         self.connected = True
@@ -150,6 +166,31 @@ class RobotController:
             "data": data or {}
         }
         self.ws.send(json.dumps(msg))
+    
+    def get_current_ee_pose(self):
+        """获取当前末端执行器位姿（baselink坐标系）"""
+        # 重置响应标志
+        self.ee_pose_response = None
+        
+        # 发送请求
+        self.send_command("request_get_ub_manip_ee_pose", {})
+        
+        # 等待响应（最多2秒）
+        timeout = 2.0
+        start = time.time()
+        while self.ee_pose_response is None and (time.time() - start) < timeout:
+            time.sleep(0.01)
+        
+        if self.ee_pose_response and self.ee_pose_response.get('result') == 'success':
+            return {
+                'left_hand_pos': self.ee_pose_response.get('left_hand_pos'),
+                'left_hand_quat': self.ee_pose_response.get('left_hand_quat'),
+                'right_hand_pos': self.ee_pose_response.get('right_hand_pos'),
+                'right_hand_quat': self.ee_pose_response.get('right_hand_quat')
+            }
+        else:
+            print("⚠️  获取机器人位姿失败")
+            return None
         
     def enter_damping(self):
         """进入阻尼模式"""
@@ -177,12 +218,12 @@ class RobotController:
         }
         self.send_command("request_set_ub_manip_ee_pose", data)
         
-    def clip_to_workspace(self, offset):
-        """限制偏移量到安全范围"""
+    def clip_to_workspace(self, pos):
+        """限制位置到安全工作空间（baselink坐标系下的绝对位置）"""
         return [
-            np.clip(offset[0], self.workspace['x_min'], self.workspace['x_max']),
-            np.clip(offset[1], self.workspace['y_min'], self.workspace['y_max']),
-            np.clip(offset[2], self.workspace['z_min'], self.workspace['z_max'])
+            np.clip(pos[0], self.workspace['x_min'], self.workspace['x_max']),
+            np.clip(pos[1], self.workspace['y_min'], self.workspace['y_max']),
+            np.clip(pos[2], self.workspace['z_min'], self.workspace['z_max'])
         ]
     
     def smooth_position(self, target_pos, smoothed_pos):
@@ -309,11 +350,13 @@ def matrix_to_pos_quat(matrix):
     return pos, quat
 
 
-def save_calibration(calib_left, calib_right, filename="vr_calibration.pkl"):
+def save_calibration(calib_left, calib_right, robot_base_left_pos, robot_base_right_pos, filename="vr_calibration.pkl"):
     """保存标定数据"""
     calib_data = {
-        'calib_left': calib_left,
-        'calib_right': calib_right,
+        'calib_left': calib_left,  # VR左手参考位置
+        'calib_right': calib_right,  # VR右手参考位置
+        'robot_base_left_pos': robot_base_left_pos,  # 机器人左手初始绝对位置（baselink坐标系）
+        'robot_base_right_pos': robot_base_right_pos,  # 机器人右手初始绝对位置（baselink坐标系）
         'timestamp': time.time()
     }
     with open(filename, 'wb') as f:
@@ -333,10 +376,17 @@ def load_calibration(filename="vr_calibration.pkl"):
         timestamp = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(calib_data['timestamp']))
         print(f"\n📂 找到标定文件:")
         print(f"   保存时间: {timestamp}")
-        print(f"   左手参考: {calib_data['calib_left'][:3, 3]}")
-        print(f"   右手参考: {calib_data['calib_right'][:3, 3]}")
+        print(f"   VR左手参考: {calib_data['calib_left'][:3, 3]}")
+        print(f"   VR右手参考: {calib_data['calib_right'][:3, 3]}")
         
-        return calib_data['calib_left'], calib_data['calib_right']
+        robot_base_left_pos = calib_data.get('robot_base_left_pos', None)
+        robot_base_right_pos = calib_data.get('robot_base_right_pos', None)
+        
+        if robot_base_left_pos:
+            print(f"   机器人左手初始位置: {robot_base_left_pos}")
+            print(f"   机器人右手初始位置: {robot_base_right_pos}")
+        
+        return calib_data['calib_left'], calib_data['calib_right'], robot_base_left_pos, robot_base_right_pos
     except Exception as e:
         print(f"❌ 加载标定失败: {e}")
         return None
@@ -532,8 +582,34 @@ def main():
         time.sleep(1)
     print("   ✅ 时间到!\n")
     
+    # 标定VR位置
     calib_left, calib_right = calibrate_vr(tv_wrapper)
-    save_calibration(calib_left, calib_right)
+    
+    # 获取机器人当前位置（baselink坐标系）
+    print("\n🤖 获取机器人当前位置...")
+    robot_pose = robot.get_current_ee_pose()
+    
+    if robot_pose is None:
+        print("❌ 无法获取机器人位置，退出")
+        return
+    
+    robot_base_left_pos = robot_pose['left_hand_pos']
+    robot_base_right_pos = robot_pose['right_hand_pos']
+    
+    # 验证数据有效性
+    if robot_base_left_pos is None or robot_base_right_pos is None:
+        print("❌ 机器人位置数据无效，退出")
+        return
+    
+    print(f"✅ 机器人左手初始位置（baselink）: {robot_base_left_pos}")
+    print(f"✅ 机器人右手初始位置（baselink）: {robot_base_right_pos}")
+    
+    # 保存标定数据
+    save_calibration(calib_left, calib_right, robot_base_left_pos, robot_base_right_pos)
+    
+    # 将初始位置保存到robot对象
+    robot.base_left_pos = robot_base_left_pos
+    robot.base_right_pos = robot_base_right_pos
     
     # 主控制循环
     print("\n"+"="*60)
@@ -558,17 +634,29 @@ def main():
             # 获取VR数据
             tele_data = tv_wrapper.get_motion_state_data()
             
-            # 计算相对偏移
-            left_offset = (tele_data.left_arm_pose[:3, 3] - calib_left[:3, 3]).tolist()
-            right_offset = (tele_data.right_arm_pose[:3, 3] - calib_right[:3, 3]).tolist()
+            # 计算VR相对偏移
+            left_vr_offset = (tele_data.left_arm_pose[:3, 3] - calib_left[:3, 3]).tolist()
+            right_vr_offset = (tele_data.right_arm_pose[:3, 3] - calib_right[:3, 3]).tolist()
             
             # 应用运动缩放系数
-            left_offset = [x * robot.motion_scale for x in left_offset]
-            right_offset = [x * robot.motion_scale for x in right_offset]
+            left_vr_offset_scaled = [x * robot.motion_scale for x in left_vr_offset]
+            right_vr_offset_scaled = [x * robot.motion_scale for x in right_vr_offset]
             
-            # 限制到安全范围
-            left_offset_safe = robot.clip_to_workspace(left_offset)
-            right_offset_safe = robot.clip_to_workspace(right_offset)
+            # 计算baselink坐标系下的绝对位置 = 初始位置 + 缩放后的VR偏移
+            left_target_pos = [
+                robot.base_left_pos[0] + left_vr_offset_scaled[0],
+                robot.base_left_pos[1] + left_vr_offset_scaled[1],
+                robot.base_left_pos[2] + left_vr_offset_scaled[2]
+            ]
+            right_target_pos = [
+                robot.base_right_pos[0] + right_vr_offset_scaled[0],
+                robot.base_right_pos[1] + right_vr_offset_scaled[1],
+                robot.base_right_pos[2] + right_vr_offset_scaled[2]
+            ]
+            
+            # 限制到安全工作空间
+            left_pos_safe = robot.clip_to_workspace(left_target_pos)
+            right_pos_safe = robot.clip_to_workspace(right_target_pos)
             
             # 提取四元数（双臂和头部）
             _, left_quat = matrix_to_pos_quat(tele_data.left_arm_pose)
@@ -577,9 +665,9 @@ def main():
             
             # 发送到机器人（带平滑和速度限制）
             robot.set_pose_smooth(
-                left_pos=left_offset_safe,
+                left_pos=left_pos_safe,
                 left_quat=left_quat,
-                right_pos=right_offset_safe,
+                right_pos=right_pos_safe,
                 right_quat=right_quat,
                 head_quat=head_quat,
                 dt=dt
@@ -639,8 +727,8 @@ def main():
                     right_g = int((1.0 - right_sq) * 1000)
                     gripper_info = f"  夹爪 L:{left_g:4d} R:{right_g:4d} [Grip: L:{left_sq:.2f} R:{right_sq:.2f}]"
                 
-                print(f"\r左: [{left_offset_safe[0]:+.3f}, {left_offset_safe[1]:+.3f}, {left_offset_safe[2]:+.3f}]  "
-                      f"右: [{right_offset_safe[0]:+.3f}, {right_offset_safe[1]:+.3f}, {right_offset_safe[2]:+.3f}]"
+                print(f"\r左手: [{left_pos_safe[0]:+.3f}, {left_pos_safe[1]:+.3f}, {left_pos_safe[2]:+.3f}]  "
+                      f"右手: [{right_pos_safe[0]:+.3f}, {right_pos_safe[1]:+.3f}, {right_pos_safe[2]:+.3f}]"
                       f"{gripper_info}", end='')
             
             # 控制频率
