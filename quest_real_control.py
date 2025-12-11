@@ -562,6 +562,9 @@ def main():
     print("✅ 准备模式")
     time.sleep(1)
     
+    print("⚠️-------清放下吊起的机器人.....然后按回车....---------")
+    input()
+
     robot.set_ub_manip_mode(0)
     print("✅ Mode 0 (初始姿态)")
     time.sleep(2)
